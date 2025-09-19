@@ -962,6 +962,226 @@ class MainApp:
 
 
 
+    def _build_menu(self):
+
+        accent_color = self._accent_ui()
+        menu_bgcolor = "#16213e" if self.is_dark_mode else "#ffffff"
+        divider_color = ft.Colors.with_opacity(0.1, "white" if self.is_dark_mode else "black")
+
+
+
+        self.menu_logo_icon = ft.Icon(
+            name=ft.Icons.SHOW_CHART_ROUNDED,
+            color=accent_color,
+            size=32,
+        )
+        self.menu_logo_text = ft.Text(
+            "Vibrations",
+            size=18,
+            weight=ft.FontWeight.BOLD,
+            color=accent_color,
+        )
+
+        header = ft.Container(
+            padding=ft.padding.symmetric(vertical=20, horizontal=12),
+            content=ft.Row(
+                controls=[self.menu_logo_icon, self.menu_logo_text],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=10,
+            ),
+        )
+
+
+        menu_items = [
+            ("welcome", ft.Icons.HOME_ROUNDED, "Inicio"),
+            ("files", ft.Icons.FOLDER_OPEN_ROUNDED, "Archivos"),
+            ("analysis", ft.Icons.ANALYTICS_OUTLINED, "Análisis"),
+            ("bearings", ft.Icons.PRECISION_MANUFACTURING, "Rodamientos"),
+            ("reports", ft.Icons.ARTICLE_ROUNDED, "Reportes"),
+            ("settings", ft.Icons.SETTINGS_ROUNDED, "Configuración"),
+        ]
+
+
+        buttons_column = []
+        self.menu_buttons.clear()
+        for key, icon_name, tooltip in menu_items:
+            button = MenuButton(
+                icon_name,
+                tooltip,
+                self._on_menu_click,
+                data=key,
+                is_dark=self.is_dark_mode,
+            )
+            button.accent = accent_color
+            if key == self.last_view:
+                button.set_active(True, safe=True)
+            self.menu_buttons[key] = button
+            buttons_column.append(button)
+
+
+        menu_content = ft.Column(
+            controls=[header, ft.Divider(height=1, color=divider_color)] + buttons_column,
+            alignment=ft.MainAxisAlignment.START,
+            spacing=10,
+            expand=True,
+        )
+
+
+        menu_container = ft.Container(
+            width=90,
+            bgcolor=menu_bgcolor,
+            padding=ft.padding.only(top=10, bottom=10),
+            content=menu_content,
+        )
+
+        return menu_container
+
+
+
+    def _build_control_panel(self):
+
+        accent_color = self._accent_ui()
+        panel_bg = "#16213e" if self.is_dark_mode else "#ffffff"
+        text_color = "#ecf0f1" if self.is_dark_mode else "#2c3e50"
+
+
+
+        toggle_button = ft.IconButton(
+            icon=ft.Icons.CHEVRON_LEFT_ROUNDED if self.is_panel_expanded else ft.Icons.CHEVRON_RIGHT_ROUNDED,
+            tooltip="Contraer panel" if self.is_panel_expanded else "Expandir panel",
+            on_click=self._toggle_panel,
+        )
+        header_title = ft.Text("Panel rápido", size=16, weight="bold", color=text_color)
+        panel_header = ft.Row(
+            controls=[header_title, toggle_button],
+            alignment="spaceBetween",
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+
+        self.clock_text.color = text_color
+        self.clock_card = ft.Container(
+            bgcolor=ft.Colors.with_opacity(0.1, accent_color),
+            padding=ft.padding.symmetric(vertical=12, horizontal=16),
+            border_radius=12,
+            content=ft.Column(
+                controls=[
+                    ft.Text("Hora actual", size=12, color=text_color),
+                    self.clock_text,
+                ],
+                spacing=4,
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+        )
+
+
+        self.btn_upload = ft.ElevatedButton(
+            "Cargar datos",
+            icon=ft.Icons.UPLOAD_FILE_ROUNDED,
+            on_click=self._pick_files,
+            style=ft.ButtonStyle(bgcolor=accent_color, color="white"),
+        )
+
+        self.data_search = ft.TextField(
+            label="Buscar archivo",
+            hint_text="Nombre o palabra clave",
+            prefix_icon=ft.Icons.SEARCH,
+            dense=True,
+            on_change=lambda e: self._refresh_files_list(),
+            expand=True,
+        )
+        self.data_favs_only_cb = ft.Checkbox(
+            label="Solo favoritos",
+            value=self.data_show_favs_only,
+            on_change=lambda e: self._toggle_data_favs_filter(),
+        )
+
+        filters_row = ft.Row(
+            controls=[self.data_search, self.data_favs_only_cb],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            alignment="spaceBetween",
+        )
+
+        files_section = ft.Column(
+            controls=[
+                ft.Text("Archivos recientes", weight="bold", size=14, color=text_color),
+                self.btn_upload,
+                filters_row,
+                ft.Container(
+                    content=self.files_list_view,
+                    expand=True,
+                    padding=ft.padding.only(top=8),
+                ),
+            ],
+            spacing=12,
+            expand=True,
+        )
+
+        self.quick_actions = ft.Column(
+            controls=[self.clock_card, files_section],
+            spacing=16,
+            expand=True,
+        )
+
+        self.help_panel = ft.Column(
+            controls=[
+                ft.Text("📋 Ayuda", size=16, weight="bold"),
+                ft.Text("Seleccione una sección para ver ayuda contextual.", size=13),
+            ],
+            spacing=10,
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
+        )
+
+        self.log_panel = ft.Column(
+            controls=[],
+            spacing=6,
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
+        )
+
+        self.tabs = ft.Tabs(
+            tabs=[
+                ft.Tab(text="Acciones"),
+                ft.Tab(text="Ayuda"),
+                ft.Tab(text="Registro"),
+            ],
+            selected_index=0,
+            on_change=self._on_tab_change,
+        )
+
+        self.tab_content = ft.Container(
+            expand=True,
+            content=self.quick_actions,
+        )
+
+        panel_body = ft.Container(
+            expand=True,
+            content=ft.Column(
+                controls=[self.tabs, self.tab_content],
+                spacing=16,
+                expand=True,
+            ),
+            visible=self.is_panel_expanded,
+        )
+
+        control_panel = ft.Container(
+            width=350 if self.is_panel_expanded else 65,
+            bgcolor=panel_bg,
+            padding=ft.padding.all(20 if self.is_panel_expanded else 10),
+            content=ft.Column(
+                controls=[panel_header, panel_body],
+                spacing=16,
+                expand=True,
+            ),
+        )
+
+        self._refresh_files_list()
+
+        return control_panel
+
+
+
     def _apply_theme(self):
 
         self.page.theme_mode = ft.ThemeMode.DARK if self.is_dark_mode else ft.ThemeMode.LIGHT

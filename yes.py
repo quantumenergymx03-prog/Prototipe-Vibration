@@ -2,6 +2,7 @@
 import asyncio
 import time
 import pandas as pd
+from pandas.api import types as pd_types
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from flet.matplotlib_chart import MatplotlibChart
@@ -851,6 +852,9 @@ class MainApp:
         self.uploaded_files = []
 
         self.current_df = None
+        self._column_cache: Dict[Tuple[str, str], Optional[np.ndarray]] = {}
+        self.default_time_col: Optional[str] = None
+        self.default_signal_cols: List[str] = []
 
         self.file_data_storage = {}  # Almacenar datos de archivos
 
@@ -1856,8 +1860,11 @@ class MainApp:
             plt.style.use("seaborn-v0_8-whitegrid")
             plt.rcParams["font.family"] = "DejaVu Sans"
 
-            t = self.current_df[time_col].to_numpy()
-            signal = self.current_df[fft_signal_col].to_numpy()
+            extracted = self._extract_time_signal(time_col, fft_signal_col)
+            if not extracted or any(part is None for part in extracted):
+                self._log("No se pudo interpretar las columnas seleccionadas para exportar")
+                return
+            t, signal = extracted
 
             try:
                 start_t = float(self.start_time_field.value) if getattr(self.start_time_field, "value", None) else t[0]
@@ -2256,1229 +2263,24 @@ class MainApp:
                         findings_pdf.append(note)
 
             aux_imgs = []
-            aux_selected = []
-            try:
-                aux_selected = [
-                    (cb.label, color_dd.value, style_dd.value)
-                    for cb, color_dd, style_dd in getattr(self, "aux_controls", [])
-                    if getattr(cb, "value", False)
-                ]
-            except Exception:
-                aux_selected = []
-            for col, color, style in aux_selected:
-                if col in self.current_df.columns:
-                    aux_fig, aux_ax = plt.subplots(figsize=(8, 2))
-                    aux_ax.plot(self.current_df[time_col], self.current_df[col], color=color, linestyle=style, linewidth=2, label=col)
-                    aux_ax.set_title(f"{col} vs Tiempo")
-                    aux_ax.legend()
-                    aux_ax.set_xlabel("Tiempo (s)")
-                    aux_ax.set_ylabel(col)
-                    aux_imgs.append(save_plot(aux_fig))
-
-
-            if img_wf:
-                tmp_imgs.append(img_wf)
-
-            doc = SimpleDocTemplate(pdf_path, pagesize=A4)
-            pdf_image_width = _pdf_available_width(doc)
-            styles = getSampleStyleSheet()
-            title_style = ParagraphStyle("title", parent=styles['Title'], textColor=colors.HexColor(self._accent_hex()))
-
-            elements = []
-            elements.append(Paragraph("Informe de Análisis de Vibraciones", title_style))
-            elements.append(Spacer(1, 18))
-            elements.append(Paragraph(f"Archivo analizado: {base_name}", styles['Normal']))
-            elements.append(Paragraph(f"Periodo analizado: {start_t:.2f}s - {end_t:.2f}s", styles['Normal']))
-            elements.append(Paragraph(f"Fecha de generacion: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
-            elements.append(Paragraph(f"Aplicacion: V-Analyzer {APP_VERSION}", styles['Normal']))
-            elements.append(Spacer(1, 18))
-
-            cover_summary = [
-                ["Indicador", "Valor"],
-                ["RMS velocidad", f"{rms_mm:.3f} mm/s"],
-                ["Clasificacion ISO", severity_mm],
-                ["Frecuencia dominante", f"{features_full['dom_freq']:.2f} Hz"],
-            ]
-            tbl_cover = Table(cover_summary, colWidths=[200, 200])
-            tbl_cover.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, -1), colors.white),
-                ("TEXTCOLOR", (0, 0), (-1, -1), colors.black),
-                ("FONTNAME", (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-            ]))
-            elements.append(tbl_cover)
-            elements.append(PageBreak())
-
-            # Nota filtro visual (export): obtiene estado actual de la UI
-            try:
-                _pdf_fc = float(self.lf_cutoff_field.value) if getattr(self, 'lf_cutoff_field', None) and getattr(self.lf_cutoff_field, 'value', '') else 0.5
-            except Exception:
-                _pdf_fc = 0.5
-            try:
-                _pdf_hide_lf = bool(getattr(self, 'hide_lf_cb', None).value)
-            except Exception:
-                _pdf_hide_lf = True
-            _pdf_fft_filter_note = f"Filtro visual FFT: oculta < {_pdf_fc:.2f} Hz" if _pdf_hide_lf else "Filtro visual FFT: sin ocultar"
-
-            elements.append(Paragraph("Resumen Ejecutivo", styles['Heading1']))
-            exec_findings_all = findings_pdf[1:] if len(findings_pdf) > 1 else []
-            exec_findings = self._select_main_findings(exec_findings_all)
-            if wf_pdf_notes:
-                for note in wf_pdf_notes:
-                    if note not in exec_findings:
-                        exec_findings.append(note)
-            if not exec_findings:
-                exec_findings = ["Sin anomalias evidentes segun reglas actuales."]
-            elements.append(Paragraph(f"Clasificacion ISO: {severity_mm}", styles['Normal']))
-            elements.append(Paragraph(f"RMS velocidad: {rms_mm:.3f} mm/s", styles['Normal']))
-            elements.append(Paragraph(f"Frecuencia dominante: {features_full['dom_freq']:.2f} Hz", styles['Normal']))
-            elements.append(Paragraph(_pdf_fft_filter_note, styles['Normal']))
-            elements.append(Spacer(1, 8))
-            # Semáforo de severidad (actual + otros atenuados)
-            try:
-                # Mapear label a índice
-                def _sev_index(lbl: str) -> int:
-                    s = (lbl or "").lower()
-                    if "buena" in s:
-                        return 0
-                    if "satisfact" in s:
-                        return 1
-                    if "insatisfact" in s:
-                        return 2
-                    if "inaceptable" in s:
-                        return 3
-                    return -1
-                cur_idx = _sev_index(severity_mm)
-                # Colores base
-                base = [
-                    ("Buena", "#2ecc71"),
-                    ("Satisfactoria", "#f1c40f"),
-                    ("Insatisfactoria", "#e67e22"),
-                    ("Inaceptable", "#e74c3c"),
-                ]
-                # Helper para aclarar colores
-                def _lighten_hex(hx: str, f: float):
-                    try:
-                        hx = hx.lstrip('#')
-                        r = int(hx[0:2], 16) / 255.0
-                        g = int(hx[2:4], 16) / 255.0
-                        b = int(hx[4:6], 16) / 255.0
-                        r = r + (1.0 - r) * f
-                        g = g + (1.0 - g) * f
-                        b = b + (1.0 - b) * f
-                        from reportlab.lib import colors as _c
-                        return _c.Color(r, g, b)
-                    except Exception:
-                        return colors.lightgrey
-                # Construir tabla de 2 filas: bloques de color + etiquetas
-                cells = ["", "", "", ""]
-                labels = [t for t, _ in base]
-                sem_tbl = Table([cells, labels], colWidths=[90, 110, 130, 120])
-                ts = []
-                for i, (name, hx) in enumerate(base):
-                    if i == cur_idx:
-                        bg = colors.HexColor(hx)
-                    else:
-                        bg = _lighten_hex(hx, 0.65)
-                    ts.append(("BACKGROUND", (i, 0), (i, 0), bg))
-                    ts.append(("BOX", (i, 0), (i, 0), 0.5, colors.black))
-                    ts.append(("ALIGN", (i, 0), (i, 0), "CENTER"))
-                    ts.append(("ALIGN", (i, 1), (i, 1), "CENTER"))
-                ts.append(("GRID", (0, 1), (-1, 1), 0.25, colors.grey))
-                sem_tbl.setStyle(TableStyle(ts))
-                elements.append(Paragraph("Semáforo de severidad", styles['Heading2']))
-                elements.append(sem_tbl)
-                elements.append(Spacer(1, 12))
-            except Exception:
-                pass
-            # Omitir bloque duplicado de diagnostico para evitar repeticion
-            # elements.append(Paragraph("Diagnostico:", styles['Heading2']))
-            for item in []:
-                elements.append(Paragraph(f"- {item}", styles['Normal']))
-
-            # Explicacion y recomendaciones (PDF)
-            # Explicación y recomendaciones (unificadas con la app)
-            exp_lines_pdf2 = self._build_explanations(res, exec_findings)
-            if wf_pdf_notes:
-                for note in wf_pdf_notes:
-                    msg = f"Arranque/parada: {note}"
-                    if msg not in exp_lines_pdf2:
-                        exp_lines_pdf2.append(msg)
-            elements.append(Paragraph("Explicacion y recomendaciones", styles['Heading2']))
-            for line in exp_lines_pdf2:
-                elements.append(Paragraph(f"- {line}", styles['Normal']))
-
-            
-
-            elements.append(Paragraph("Reporte de Análisis de Vibraciones", title_style))
-            elements.append(Paragraph(f"Archivo: {base_name}", styles['Normal']))
-            elements.append(Paragraph(f"Periodo: {start_t:.2f}s - {end_t:.2f}s", styles['Normal']))
-            elements.append(Spacer(1, 12))
-
-            # Top picos (FFT)
-            if top_peaks:
-                elements.append(Paragraph("Picos principales (FFT)", styles['Heading2']))
-                peaks_data = [["Frecuencia (Hz)", "Amplitud (mm/s)", "Orden (X)"]]
-                for pf, pa, order in top_peaks:
-                    peaks_data.append([f"{pf:.2f}", f"{pa:.3f}", f"{order:.2f}" if order else "-"])
-                tbl_peaks = Table(peaks_data, colWidths=[120, 140, 120])
-                tbl_peaks.setStyle(TableStyle([
-                    ("BACKGROUND", (0, 0), (-1, -1), colors.white),
-                    ("TEXTCOLOR", (0, 0), (-1, -1), colors.black),
-                    ("FONTNAME", (0, 0), (-1, 0), 'Helvetica-Bold'),
-                    ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-                ]))
-                elements.append(tbl_peaks)
-                elements.append(Spacer(1, 12))
-
-            data_summary = [
-                ["Metrica", "Valor"],
-                ["RMS (velocidad)", f"{rms_mm:.3f} mm/s"],
-                ["Clasificacion ISO", severity_mm],
-                ["Frecuencia dominante", f"{features_full['dom_freq']:.2f} Hz"],
-            ]
-            table_summary = Table(data_summary, colWidths=[200, 200])
-            table_summary.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, -1), colors.white),
-                ("TEXTCOLOR", (0, 0), (-1, -1), colors.black),
-                ("FONTNAME", (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.black)
-            ]))
-            elements.append(table_summary)
-            elements.append(Spacer(1, 12))
-
-            elements.append(Paragraph("Senal temporal", styles['Heading2']))
-            elements.append(_pdf_image(img_time, pdf_image_width, 320))
-            elements.append(Spacer(1, 8))
-            elements.append(Paragraph("Espectro FFT", styles['Heading2']))
-            elements.append(_pdf_image(img_fft, pdf_image_width, 320))
-            elements.append(Spacer(1, 8))
-            if img_wf:
-                elements.append(CondPageBreak(360))
-                elements.append(Paragraph("Analisis de arranque/parada (3D)", styles['Heading2']))
-                elements.append(_pdf_image(img_wf, pdf_image_width, 360))
-                elements.append(Spacer(1, 8))
-            if img_env:
-                elements.append(CondPageBreak(320))
-                elements.append(Paragraph("Espectro de envolvente", styles['Heading2']))
-                elements.append(_pdf_image(img_env, pdf_image_width, 320))
-                elements.append(Spacer(1, 8))
-
-            if aux_imgs:
-                elements.append(Paragraph("Variables auxiliares", styles['Heading2']))
-                for img in aux_imgs:
-                    elements.append(Image(img, width=400, height=120))
-                aux_data = [["Variable", "Promedio", "Mínimo", "Máximo"]]
-                for col, _, _ in aux_selected:
-                    if col in self.current_df.columns:
-                        vals = self.current_df[col].dropna().to_numpy()
-                        if len(vals) > 0:
-                            aux_data.append([col, f"{np.mean(vals):.2f}", f"{np.min(vals):.2f}", f"{np.max(vals):.2f}"])
-                if len(aux_data) > 1:
-                    aux_table = Table(aux_data, colWidths=[150, 100, 100, 100])
-                    aux_table.setStyle(TableStyle([
-                        ("BACKGROUND", (0, 0), (-1, -1), colors.white),
-                        ("TEXTCOLOR", (0, 0), (-1, -1), colors.black),
-                        ("FONTNAME", (0, 0), (-1, 0), 'Helvetica-Bold'),
-                        ("GRID", (0, 0), (-1, -1), 0.5, colors.black)
-                    ]))
-                    elements.append(aux_table)
-
-            elements.append(Spacer(1, 12))
-            elements.append(Paragraph("Diagnóstico", styles['Heading2']))
-            elements.append(Paragraph(f"El valor RMS calculado es {rms_mm:.3f} mm/s, lo cual corresponde a: {severity_mm}.", styles['Normal']))
-            for item in findings_pdf:
-                elements.append(Paragraph(f"- {item}", styles['Normal']))
-
-            # Propiedades del equipo (al final)
-            try:
-                def _tfv(tf):
-                    try:
-                        return str(tf.value).strip() if tf and getattr(tf, 'value', '') != '' else ''
-                    except Exception:
-                        return ''
-                props = []
-                # Rodamiento (modelo y geometría)
-                try:
-                    model = getattr(self, 'bearing_model_dd', None).value if getattr(self, 'bearing_model_dd', None) else ''
-                except Exception:
-                    model = ''
-                if model:
-                    props.append(["Rodamiento (modelo)", model])
-                props.append(["Elementos (n)", _tfv(getattr(self, 'br_n_field', None))])
-                props.append(["d (mm)", _tfv(getattr(self, 'br_d_mm_field', None))])
-                props.append(["D (mm)", _tfv(getattr(self, 'br_D_mm_field', None))])
-                props.append(["Ángulo (°)", _tfv(getattr(self, 'br_theta_deg_field', None))])
-                # Máquina
-                props.append(["RPM", _tfv(getattr(self, 'rpm_hint_field', None))])
-                props.append(["Línea (Hz)", (getattr(self, 'line_freq_dd', None).value if getattr(self, 'line_freq_dd', None) else '')])
-                props.append(["Dientes engrane", _tfv(getattr(self, 'gear_teeth_field', None))])
-                # Frecuencias teóricas
-                props.append(["BPFO (Hz)", _tfv(getattr(self, 'bpfo_field', None))])
-                props.append(["BPFI (Hz)", _tfv(getattr(self, 'bpfi_field', None))])
-                props.append(["BSF (Hz)", _tfv(getattr(self, 'bsf_field', None))])
-                props.append(["FTF (Hz)", _tfv(getattr(self, 'ftf_field', None))])
-                # Sensor
-                try:
-                    sens_type = getattr(self, 'sens_unit_dd', None).value if getattr(self, 'sens_unit_dd', None) else ''
-                except Exception:
-                    sens_type = ''
-                if sens_type:
-                    props.append(["Sensor", sens_type])
-                props.append(["Sensibilidad", _tfv(getattr(self, 'sensor_sens_field', None))])
-                props.append(["Ganancia (V/V)", _tfv(getattr(self, 'gain_field', None))])
-
-                props = [[k, v] for k, v in props if str(v) != '']
-                if props:
-                    elements.append(Spacer(1, 12))
-                    elements.append(Paragraph("Propiedades del equipo", styles['Heading2']))
-                    tbl_props = Table([["Propiedad", "Valor"]] + props, colWidths=[200, 200])
-                    tbl_props.setStyle(TableStyle([
-                        ("BACKGROUND", (0, 0), (-1, 0), colors.white),
-                        ("FONTNAME", (0, 0), (-1, 0), 'Helvetica-Bold'),
-                        ("TEXTCOLOR", (0, 0), (-1, -1), colors.black),
-                        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-                    ]))
-                    elements.append(tbl_props)
-            except Exception:
-                pass
-
-            doc.build(elements)
-
-            if not hasattr(self, "generated_reports"):
-                self.generated_reports = []
-            self.generated_reports.append(pdf_path)
-
-            self._log(f"Reporte exportado: {pdf_path}")
-            self.page.snack_bar = ft.SnackBar(content=ft.Text(f"✅ Reporte PDF generado: {pdf_name}"), action="OK")
-            self.page.snack_bar.open = True
-            self.page.update()
-            return pdf_path
-        except Exception as ex:
-            self._log(f"Error exportando PDF: {ex}")
-        finally:
-            try:
-                plt.rcParams.update(prev_style)
-            except Exception:
-                pass
-
-
-
-    def _build_menu(self):
-
-        def mb(icon, tip, key):
-
-            b = MenuButton(icon, tip, self._on_menu_click, key, self.is_dark_mode)
-            try:
-                b.accent = self.accent
-            except Exception:
-                pass
-
-            # Asegurar etiqueta de eje Y acorde a unidad seleccionada
-            try:
-                ax1.set_ylabel(_ylabel)
-            except Exception:
-                pass
-            try:
-                ax1.ticklabel_format(style="sci", axis="y", scilimits=(-2, 3))
-            except Exception:
-                pass
-
-            self.menu_buttons[key] = b
-
-            return b
-
-
-
-        return ft.Container(
-
-            width=80,  # Ancho fijo reducido
-
-            expand=0,  # Sin expansión
-
-            border_radius=0,
-
-            bgcolor="#16213e" if self.is_dark_mode else "#ffffff",
-
-            padding=ft.padding.only(
-
-                left=5,
-
-                right=5,
-
-                top=20,
-
-                bottom=20
-
-            ),
-
-            shadow=ft.BoxShadow(
-
-                spread_radius=1,
-
-                blur_radius=10,
-
-                color=ft.Colors.with_opacity(0.3, "black"),
-
-                offset=ft.Offset(2, 0),
-
-            ),
-
-            animate=ft.Animation(300, "easeInOut"),
-
-            content=ft.Column(
-
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-
-                controls=[
-
-                    ft.Container(
-
-                        content=(
-                            setattr(self, "menu_logo_icon", ft.Icon(ft.Icons.VIBRATION_ROUNDED, size=40, color=self._accent_ui()))
-                            or self.menu_logo_icon
-                        ),
-
-                        padding=ft.padding.only(bottom=10),
-
-                        visible=self.is_menu_expanded,
-
-                        animate=ft.Animation(300, "easeInOut"),
-
-                    ),
-
-                    ft.Container(
-
-                        content=(
-                            setattr(self, "menu_logo_text", ft.Text(
-                                "V-Analyzer",
-                                size=12,
-                                weight="bold",
-                                color=self._accent_ui(),
-                            ))
-                            or self.menu_logo_text
-                        ),
-
-                        visible=self.is_menu_expanded,
-
-                        animate=ft.Animation(300, "easeInOut"),
-
-                    ),
-
-                    ft.Divider(
-
-                        height=20,
-
-                        color=ft.Colors.with_opacity(0.2, "white"),
-
-                        visible=self.is_menu_expanded
-
-                    ),
-
-                    ft.Column(expand=True, controls=[]),
-
-                    *[mb(icon, tip, key) for icon, tip, key in [
-
-                        (ft.Icons.HOME_ROUNDED, "Inicio", "welcome"),
-
-                        (ft.Icons.FOLDER_OPEN_ROUNDED, "Archivos", "files"),
-
-                        (ft.Icons.INSIGHTS_ROUNDED, "Análisis", "analysis"),
-
-                        (ft.Icons.ASSESSMENT_ROUNDED, "Reportes", "reports"),
-
-                        (ft.Icons.SETTINGS_ROUNDED, "Configuración", "settings"),
-
-                    ]],
-
-                    ft.Divider(height=20, color="transparent"),
-
-                    ft.Container(
-
-                        content=ft.Text(
-
-                            APP_VERSION,
-
-                            size=9,
-
-                            color="#7f8c8d",
-
-                            text_align="center",
-
-                        ),
-
-                        visible=self.is_menu_expanded,
-
-                        animate=ft.Animation(300, "easeInOut"),
-
-                    ),
-
-                ],
-
-            ),
-
-        )
-
-
-
-    def _toggle_menu(self, e):
-
-        self.is_menu_expanded = not self.is_menu_expanded
-
-        
-
-        # Actualizar icono del botón
-
-        e.control.icon = (
-
-            ft.Icons.CHEVRON_LEFT_ROUNDED 
-
-            if self.is_menu_expanded 
-
-            else ft.Icons.CHEVRON_RIGHT_ROUNDED
-
-        )
-
-        
-
-        # Actualizar el menú
-
-        self.menu.width = 100 if self.is_menu_expanded else 80
-
-        self.menu.padding = ft.padding.only(
-
-            left=15 if self.is_menu_expanded else 10,
-
-            right=15 if self.is_menu_expanded else 10,
-
-            top=20,
-
-            bottom=20
-
-        )
-
-        
-
-        # Actualizar visibilidad de elementos
-
-        for control in self.menu.content.controls:
-
-            if isinstance(control, ft.Container) or isinstance(control, ft.Text) or isinstance(control, ft.Divider):
-
-                if not isinstance(control, MenuButton):
-
-                    control.visible = self.is_menu_expanded
-
-    
-
-        # Actualizar el menú
-
-        self.menu.update()
-
-
-
-    def _build_control_panel(self):
-
-        self.tabs = ft.Tabs(
-
-            selected_index=0,
-
-            tabs=[
-
-                ft.Tab(text="Acciones", icon=ft.Icons.TOUCH_APP_ROUNDED),
-
-                ft.Tab(text="Ayuda", icon=ft.Icons.HELP_OUTLINE_ROUNDED),
-
-                ft.Tab(text="Registro", icon=ft.Icons.HISTORY_ROUNDED)
-
-            ],
-
-            expand=1,
-
-            on_change=self._on_tab_change,
-
-            animation_duration=300,
-
-        )
-
-        
-
-        # Crear botón de colapsar panel
-
-        toggle_button = ft.IconButton(
-
-            icon=ft.Icons.CHEVRON_LEFT_ROUNDED,
-
-            icon_size=20,
-
-            tooltip="Colapsar panel",
-
-            on_click=self._toggle_panel,
-
-        )
-
-
-
-        panel_header = ft.Row(
-
-            controls=[
-
-                ft.Text("Panel de Control", size=18, weight="bold"),
-
-                toggle_button
-
-            ],
-
-            alignment="space_between"
-
-        )
-
-
-
-        # Resto del contenido del panel
-
-        upload_btn = ft.ElevatedButton(
-
-            "Cargar Archivo",
-
-            icon=ft.Icons.UPLOAD_FILE_ROUNDED,
-
-            on_click=self._pick_files,
-
-            style=ft.ButtonStyle(
-
-                bgcolor=self._accent_ui(),
-
-                color="white",
-
-                shape=ft.RoundedRectangleBorder(radius=10),
-
-            ),
-
-            width=200,
-
-            height=45,
-
-        )
-
-        try:
-            self.btn_upload = upload_btn
-        except Exception:
-            pass
-
-        self.quick_actions = ft.Column(
-
-            spacing=15,
-
-            controls=[
-
-                upload_btn,
-
-                ft.Row(
-
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-
-                    controls=[
-
-                        ft.IconButton(
-
-                            icon=ft.Icons.DARK_MODE_ROUNDED if not self.is_dark_mode else ft.Icons.LIGHT_MODE_ROUNDED,
-
-                            tooltip="Cambiar tema",
-
-                            on_click=self._toggle_theme,
-
-                            icon_size=24,
-
-                        ),
-
-                        ft.IconButton(
-
-                            icon=ft.Icons.ACCESS_TIME_ROUNDED,
-
-                            tooltip="Formato hora",
-
-                            on_click=self._toggle_clock_format,
-
-                            icon_size=24,
-
-                        ),
-
-                    ]
-
-                ),
-
-                (setattr(self, "clock_card", ft.Container(
-                    content=self.clock_text,
-                    bgcolor=ft.Colors.with_opacity(0.1, self._accent_ui()),
-                    padding=10,
-                    border_radius=10,
-                    alignment=ft.alignment.center,
-                )) or self.clock_card),
-
-            ]
-
-        )
-
-        
-
-        self.log_panel = ft.ListView(expand=1, auto_scroll=False, spacing=2)
-
-        self.help_panel = ft.Column(
-
-            scroll="auto",
-
-            spacing=10,
-
-            controls=[
-
-                ft.Container(
-
-                    content=ft.Text("📋 Ayuda contextual", size=16, weight="bold"),
-
-                    padding=ft.padding.only(bottom=10)
-
-                ),
-
-                ft.Text("Información de ayuda aparecerá aquí según la sección actual.", size=13)
-
-            ]
-
-        )
-
-        
-
-        self.tab_content = ft.Container(content=self.quick_actions, expand=True, padding=10)
-
-        
-
-        return ft.Container(
-
-            width=350 if self.is_panel_expanded else 80,
-
-            padding=20 if self.is_panel_expanded else 10,
-
-            border_radius=0,
-
-            bgcolor="#16213e" if self.is_dark_mode else "#ffffff",
-
-            shadow=ft.BoxShadow(
-
-                spread_radius=1,
-
-                blur_radius=10,
-
-                color=ft.Colors.with_opacity(0.3, "black"),
-
-                offset=ft.Offset(-2, 0),
-
-            ),
-
-            animate=ft.Animation(300, "easeInOut"),  # Fixed animation syntax
-
-            content=ft.Column(
-
-                expand=True,
-
-                controls=[
-
-                    panel_header,
-
-                    ft.Divider(color=ft.Colors.with_opacity(0.2, "white")),
-
-                    ft.Container(
-
-                        content=ft.Column(
-
-                            controls=[
-
-                                self.tabs,
-
-                                ft.Divider(color=ft.Colors.with_opacity(0.2, "white")),
-
-                                self.tab_content
-
-                            ]
-
-                        ),
-
-                        visible=self.is_panel_expanded
-
-                    )
-
-                ]
-
-            ),
-
-        )
-
-
-
-    def _build_welcome_view(self):
-
-        return ft.Column(
-
-            controls=[
-
-                ft.Container(height=50),
-
-                ft.Icon(ft.Icons.MONITOR_HEART_ROUNDED, size=100, color=self._accent_ui()),
-
-                ft.Container(height=20),
-
-                ft.Text(
-
-                    "Sistema de Diagnóstico Predictivo",
-
-                    size=32,
-
-                    weight="bold",
-
-                    text_align="center"
-
-                ),
-
-                ft.Text(
-
-                    "Análisis de Vibraciones Mecánicas mediante FFT y Machine Learning",
-
-                    size=16,
-
-                    color="#7f8c8d",
-
-                    text_align="center"
-
-                ),
-
-                ft.Container(height=40),
-
-                ft.Row(
-
-                    alignment="center",
-
-                    controls=[
-
-                        ft.ElevatedButton(
-
-                            "Comenzar Análisis",
-
-                            icon=ft.Icons.PLAY_ARROW_ROUNDED,
-
-                            on_click=self._pick_files,
-
-                            style=ft.ButtonStyle(
-
-                                bgcolor=self._accent_ui(),
-
-                                color="white",
-
-                                shape=ft.RoundedRectangleBorder(radius=10),
-
-                                padding=20,
-
-                            ),
-
-                            height=50,
-
-                        ),
-
-                        ft.OutlinedButton(
-
-                            "Ver Documentación",
-
-                            icon=ft.Icons.DESCRIPTION_ROUNDED,
-
-                            on_click=lambda _: self.page.launch_url("https://drive.google.com/file/d/1UqlL1s7jGTq3A38UV2r6AE2eVb915w41/view?usp=sharing")
-
-,
-
-                            style=ft.ButtonStyle(
-
-                                shape=ft.RoundedRectangleBorder(radius=10),
-
-                                padding=20,
-
-                            ),
-
-                            height=50,
-
-                        ),
-
-                    ]
-
-                ),
-
-                ft.Container(height=40),
-
-                ft.Container(
-
-                    content=ft.Column(
-
-                        horizontal_alignment="center",
-
-                        controls=[
-
-                            ft.Text("Características del Sistema", size=18, weight="bold"),
-
-                            ft.Container(height=10),
-
-                            ft.Row(
-
-                                alignment="center",
-
-                                spacing=30,
-
-                                controls=[
-
-                                    self._create_feature_card("FFT", "Transformada Rápida de Fourier", ft.Icons.TRANSFORM_ROUNDED),
-
-                                    self._create_feature_card("ML", "Machine Learning Predictivo", ft.Icons.PSYCHOLOGY_ROUNDED),
-
-                                    self._create_feature_card("ISO", "Normas ISO 20816-3", ft.Icons.VERIFIED_ROUNDED),
-
-                                ]
-
-                            )
-
-                        ]
-
-                    ),
-
-                    padding=20,
-
-                )
-            
-            
-            
-
-            ],
-
-            horizontal_alignment="center",
-
-            alignment="center",
-
-            expand=True,
-
-            
-
-        )
-
-
-
-    def _create_feature_card(self, title, subtitle, icon):
-
-        return ft.Container(
-
-            content=ft.Column(
-
-                horizontal_alignment="center",
-
-                spacing=5,
-
-                controls=[
-
-                    ft.Icon(icon, size=40, color=self._accent_ui()),
-
-                    ft.Text(title, size=16, weight="bold"),
-
-                    ft.Text(subtitle, size=12, color="#7f8c8d", text_align="center"),
-
-                ]
-
-            ),
-
-            padding=15,
-
-            border_radius=10,
-
-            bgcolor=ft.Colors.with_opacity(0.05, self._accent_ui()),
-
-            width=150,
-
-            height=120,
-
-        )
-
-
-
-    def _build_files_view(self):
-
-        self._refresh_files_list()
-
-        return ft.Column(
-
-            controls=[
-
-                ft.Container(
-
-                    content=ft.Column(
-
-                        controls=[
-
-                            ft.Row(
-
-                                alignment="space_between",
-
-                                controls=[
-
-                                    ft.Text("Gestión de Archivos", size=24, weight="bold"),
-
-                                    ft.ElevatedButton(
-
-                                        "Agregar Archivo",
-
-                                        icon=ft.Icons.ADD_ROUNDED,
-
-                                        on_click=self._pick_files,
-
-                                        style=ft.ButtonStyle(
-
-                                            bgcolor=self._accent_ui(),
-
-                                            color="white",
-
-                                            shape=ft.RoundedRectangleBorder(radius=8),
-
-                                        ),
-
-                                    ),
-
-                                ]
-
-                            ),
-
-                            ft.Row([
-                                ft.Text(f"Total de archivos: {len(self.uploaded_files)}", size=14, color="#7f8c8d"),
-                                setattr(self, 'data_favs_only_cb', ft.Checkbox(label="Mostrar favoritos", value=bool(self.data_show_favs_only), on_change=lambda e: self._toggle_data_favs_filter())) or self.data_favs_only_cb,
-                            ], alignment="spaceBetween"),
-
-                            # Buscador de archivos en gestor
-                            (setattr(self, 'data_search', ft.TextField(
-                                hint_text="Buscar por nombre...",
-                                expand=True,
-                                on_change=lambda e: self._refresh_files_list(),
-                                dense=True,
-                            )) or self.data_search),
-
-                        ]
-
-                    ),
-
-                    padding=ft.padding.only(bottom=20)
-
-                ),
-
-                ft.Container(
-
-                    content=self.files_list_view,
-
-                    border=ft.border.all(1, ft.Colors.with_opacity(0.2, "white")),
-
-                    border_radius=10,
-
-                    expand=True,
-
-                    padding=5,
-
-                )
-
-            ],
-
-            expand=True
-
-        )
-
-
-
-    def _export_pdf(self, e=None):
-        """
-
-        Exporta reporte PDF extendido con diagnóstico automático:
-
-        - Señal principal (tiempo + FFT)
-
-        - Segmento seleccionado
-
-        - Variables auxiliares
-
-        - Tablas y diagnóstico (reglas baseline)
-
-        """
-        # Legacy wrapper: delega al exportador unificado
-        try:
-            return self.exportar_pdf(e)
-        except Exception:
-            pass
-
-        try:
-
-            if self.current_df is None:
-
-                self._log("No hay datos para exportar")
-
-                return
-
-
-
-            reports_dir = os.path.join(os.getcwd(), "reports")
-
-            os.makedirs(reports_dir, exist_ok=True)
-
-
-
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-            base_name = os.path.splitext(os.path.basename(self.uploaded_files[0]))[0]
-
-            pdf_name = f"{timestamp}_{base_name}.pdf"
-
-            pdf_path = os.path.join(reports_dir, pdf_name)
-
-
-
-            # --- Estilo claro solo para PDF ---
-
-            plt.style.use("seaborn-v0_8-whitegrid")
-            plt.rcParams["font.family"] = "DejaVu Sans"
-
-
-
-            # Preparar análisis
-
-            time_col = self.time_dropdown.value
-
-            fft_signal_col = self.fft_dropdown.value
-
-            t = self.current_df[time_col].to_numpy()
-
-            signal = self.current_df[fft_signal_col].to_numpy()
-
-
-
-            # Periodo seleccionado
-
-            try:
-
-                start_t = float(self.start_time_field.value) if self.start_time_field.value else t[0]
-
-                end_t = float(self.end_time_field.value) if self.end_time_field.value else t[-1]
-
-            except:
-
-                start_t, end_t = t[0], t[-1]
-
-            mask = (t >= start_t) & (t <= end_t)
-
-            t_seg, sig_seg = t[mask], signal[mask]
-
-
-
-            # FFT -> velocidad (mm/s y m/s)
-            def compute_fft_dual(y, tv):
-                N = len(y)
-                if N < 2:
-                    return None, None, None
-                T = tv[1] - tv[0]
-                yf = np.fft.fft(y)
-                xf = np.fft.fftfreq(N, T)[:N // 2]
-                mag_acc = 2.0 / N * np.abs(yf[0:N // 2])
-                # m/s
-                mag_vel = np.zeros_like(mag_acc)
-                pos = xf > 0
-                mag_vel[pos] = mag_acc[pos] / (2 * np.pi * xf[pos])
-                # mm/s
-                mag_vel_mm = mag_vel * 1000.0
-                return xf, mag_vel_mm, mag_vel
-
-            xf, mag_vel_mm, mag_vel = compute_fft_dual(sig_seg, t_seg)
-            rms_mm = float(np.sqrt(np.mean(mag_vel_mm**2))) if mag_vel_mm is not None else 0.0
-            rms_ms = float(np.sqrt(np.mean(mag_vel**2))) if mag_vel is not None else 0.0
-            severity_mm = self._classify_severity(rms_mm)
-            severity_label_ms, severity_color_ms = self._classify_severity_ms(rms_ms)
-
-            # --- Features + diagnóstico para el PDF (usa mm/s) ---
-            features_full = self._extract_features(t_seg, sig_seg, xf, mag_vel_mm)
-            # Guardar última FFT/segmento para diagnóstico avanzado (PDF)
-            self._last_xf = xf
-            self._last_spec = mag_vel_mm
-            self._last_tseg = t_seg
-            self._last_accseg = sig_seg
-            findings_pdf = res.get('diagnosis', [])
-
-
-
-            # Guardar gráficas como imágenes
-
-            tmp_imgs = []
-
-
-
-            def save_plot(fig, *, tight=True):
-                path = tempfile.NamedTemporaryFile(delete=False, suffix=".png").name
-                bbox = "tight" if tight else None
-                fig.savefig(path, dpi=150, bbox_inches=bbox, pad_inches=0.1)
-                plt.close(fig)
-                tmp_imgs.append(path)
-                return path
-
-
-
-            # Señal principal
-            fig1, ax1 = plt.subplots(figsize=(8, 3))
-            if len(t_seg) > 0:
-                ax1.plot(t_seg, sig_seg, color="blue")
-            ax1.set_title(f"Señal {fft_signal_col} ({start_t:.2f}-{end_t:.2f}s)")
-            ax1.set_xlabel("Tiempo (s)")
-            ax1.set_ylabel("Aceleración [m/s²]")
-            # Anotar RMS aceleración
-            try:
-                rms_acc = self._calculate_rms(sig_seg)
-                ax1.text(0.02, 0.95, f"RMS acc: {rms_acc:.3e} m/s²", transform=ax1.transAxes, va="top")
-            except Exception:
-                pass
-            img_time = save_plot(fig1)
-
-            fig2, ax2 = plt.subplots(figsize=(8, 3))
-            if xf is not None and mag_vel_mm is not None:
-                ax2.plot(xf, mag_vel_mm, color="red")
-            ax2.set_title("FFT (Velocidad)")
-            ax2.set_xlabel("Frecuencia (Hz)")
-            ax2.set_ylabel("Velocidad [mm/s]")
-            # Anotación RMS (m/s) y eje superior en RPM
-            try:
-                text_color = "white" if self.is_dark_mode else "black"
-                ax2.text(0.02, 0.95, f"RMS vel: {rms_mm:.3f} mm/s", transform=ax2.transAxes,
-                         va="top", color=text_color)
-                ax2_rpm = ax2.twiny()
-                ax2_rpm.set_xlim(ax2.get_xlim()[0]*60, ax2.get_xlim()[1]*60)
-                ax2_rpm.set_xlabel("Frecuencia (RPM)")
-            except Exception:
-                pass
-            # Eje superior en RPM
-            try:
-                ax2_rpm = ax2.twiny()
-                ax2_rpm.set_xlim(ax2.get_xlim()[0] * 60, ax2.get_xlim()[1] * 60)
-                ax2_rpm.set_xlabel("Frecuencia (RPM)")
-            except Exception:
-                pass
-            img_fft = save_plot(fig2)
-
-
-            # Variables auxiliares (si las hay marcadas)
-
-            aux_selected = [(cb.label, color_dd.value, style_dd.value)
-
-                            for cb, color_dd, style_dd in self.aux_controls if cb.value]
-
-
-
-            aux_imgs = []
 
             for col, color, style in aux_selected:
+
+                pair = self._extract_time_signal(time_col, col)
+
+                if not pair or any(part is None for part in pair):
+
+                    continue
+
+                tt, yy = pair
+
+                if len(tt) < 2:
+
+                    continue
 
                 aux_fig, aux_ax = plt.subplots(figsize=(8, 2))
 
-                aux_ax.plot(self.current_df[time_col], self.current_df[col],
+                aux_ax.plot(tt, yy,
 
                             color=color, linestyle=style, linewidth=2, label=col)
 
@@ -3648,8 +2450,11 @@ class MainApp:
                 # Tabla de métricas auxiliares
                 aux_data = [["Variable", "Promedio", "Mínimo", "Máximo"]]
                 for col, _, _ in aux_selected:
-                    vals = self.current_df[col].dropna().to_numpy()
-                    if len(vals) > 0:
+                    vals_arr = self._coerce_signal_array(col)
+                    if vals_arr is None:
+                        continue
+                    vals = vals_arr[np.isfinite(vals_arr)]
+                    if vals.size > 0:
                         aux_data.append([col, f"{np.mean(vals):.2f}", f"{np.min(vals):.2f}", f"{np.max(vals):.2f}"])
                 if len(aux_data) > 1:
                     aux_table = Table(aux_data, colWidths=[150, 100, 100, 100])
@@ -3764,12 +2569,82 @@ class MainApp:
 
 
         # --- Detectar columnas ---
+        signal_cols = self._candidate_signal_columns()
+        if not signal_cols:
+            return ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, size=80, color="#e74c3c"),
+                        ft.Text(
+                            "No se encontraron señales numéricas utilizables en el archivo",
+                            size=16,
+                            text_align="center",
+                        ),
+                        ft.Text(
+                            "Verifique el formato del archivo o ajuste la configuración de importación.",
+                            size=12,
+                            text_align="center",
+                            color="#95a5a6",
+                        ),
+                    ],
+                    alignment="center",
+                    horizontal_alignment="center",
+                    spacing=10,
+                ),
+                alignment=ft.alignment.center,
+                expand=True,
+            )
 
-        numeric_cols = self.current_df.select_dtypes(include=np.number).columns.tolist()
+        time_candidates = self._candidate_time_columns()
+        if not time_candidates and len(signal_cols) < 2:
+            return ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, size=80, color="#e74c3c"),
+                        ft.Text(
+                            "El archivo necesita al menos una columna de tiempo y otra de señal numérica",
+                            size=16,
+                            text_align="center",
+                        ),
+                        ft.Text(
+                            "Verifique el formato del archivo o ajuste la configuración de importación.",
+                            size=12,
+                            text_align="center",
+                            color="#95a5a6",
+                        ),
+                    ],
+                    alignment="center",
+                    horizontal_alignment="center",
+                    spacing=10,
+                ),
+                alignment=ft.alignment.center,
+                expand=True,
+            )
 
-        initial_time_col = "t_s" if "t_s" in numeric_cols else (numeric_cols[0] if numeric_cols else None)
+        preferred_time_col = getattr(self, "default_time_col", None)
+        time_options = []
+        seen: set[str] = set()
+        for col in (time_candidates or []):
+            if col not in seen:
+                time_options.append(col)
+                seen.add(col)
+        for col in signal_cols:
+            if col not in seen:
+                time_options.append(col)
+                seen.add(col)
+        if not time_options:
+            time_options = signal_cols[:]
 
+        initial_time_col = preferred_time_col if preferred_time_col in time_options else None
+        if initial_time_col is None:
+            if "t_s" in time_options:
+                initial_time_col = "t_s"
+            else:
+                initial_time_col = time_options[0]
 
+        available_signals = [col for col in signal_cols if col != initial_time_col]
+        if not available_signals:
+            available_signals = signal_cols[:]
 
         # Dropdown tiempo
 
@@ -3777,7 +2652,7 @@ class MainApp:
 
             label="Tiempo",
 
-            options=[ft.dropdown.Option(col) for col in numeric_cols],
+            options=[ft.dropdown.Option(col) for col in time_options],
 
             value=initial_time_col,
 
@@ -3789,7 +2664,65 @@ class MainApp:
 
         # Dropdown FFT
 
-        available_signals = [col for col in numeric_cols if col != initial_time_col]
+        available_signals = [col for col in signal_cols if col != initial_time_col]
+
+        preferred_signal_cols = [
+
+            col for col in getattr(self, "default_signal_cols", []) if col in available_signals
+
+        ]
+
+        initial_fft_col = preferred_signal_cols[0] if preferred_signal_cols else (available_signals[0] if available_signals else None)
+
+        if initial_fft_col is None:
+
+            return ft.Container(
+
+                content=ft.Column(
+
+                    [
+
+                        ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, size=80, color="#e74c3c"),
+
+                        ft.Text(
+
+                            "No se encontró ninguna señal numérica para analizar",
+
+                            size=16,
+
+                            text_align="center",
+
+                        ),
+
+                        ft.Text(
+
+                            "Seleccione un archivo que incluya columnas de vibración además del tiempo.",
+
+                            size=12,
+
+                            text_align="center",
+
+                            color="#95a5a6",
+
+                        ),
+
+                    ],
+
+                    alignment="center",
+
+                    horizontal_alignment="center",
+
+                    spacing=10,
+
+                ),
+
+                alignment=ft.alignment.center,
+
+                expand=True,
+
+            )
+
+
 
         self.fft_dropdown = ft.Dropdown(
 
@@ -3797,7 +2730,7 @@ class MainApp:
 
             options=[ft.dropdown.Option(col) for col in available_signals],
 
-            value=available_signals[0] if available_signals else None,
+            value=initial_fft_col,
 
             expand=True
 
@@ -3872,7 +2805,7 @@ class MainApp:
 
             ft.Checkbox(label=col, value=(col.startswith("a")))
 
-            for col in numeric_cols if col != initial_time_col
+            for col in signal_cols if col != initial_time_col
 
         ]
 
@@ -3908,7 +2841,7 @@ class MainApp:
 
         # Variables auxiliares
 
-        aux_cols = [col for col in numeric_cols if col not in [initial_time_col, self.fft_dropdown.value]]
+        aux_cols = [col for col in signal_cols if col not in [initial_time_col, self.fft_dropdown.value]]
 
         color_options = [("#3498db", "Azul"), ("#e74c3c", "Rojo"), ("#2ecc71", "Verde"),
 
@@ -4282,6 +3215,132 @@ class MainApp:
         except Exception:
             pass
 
+
+
+    def _reset_column_cache(self):
+        self._column_cache = {}
+
+    def _count_valid(self, arr: Optional[np.ndarray]) -> int:
+        if arr is None:
+            return 0
+        try:
+            return int(np.isfinite(arr).sum())
+        except Exception:
+            return 0
+
+    def _validate_numeric_array(self, arr: Optional[np.ndarray], min_fraction: float = 0.6) -> Optional[np.ndarray]:
+        if arr is None:
+            return None
+        try:
+            arr = np.asarray(arr, dtype=float)
+        except Exception:
+            return None
+        if arr.size == 0:
+            return None
+        valid = self._count_valid(arr)
+        required = max(2, int(np.ceil(arr.size * float(max(min_fraction, 0.0)))))
+        if valid < required:
+            return None
+        return arr
+
+    def _normalize_decimal_series(self, series: pd.Series) -> pd.Series:
+        try:
+            if pd_types.is_object_dtype(series.dtype) or pd_types.is_string_dtype(series.dtype):
+                return series.astype(str).str.replace(',', '.', regex=False).str.strip()
+        except Exception:
+            pass
+        return series
+
+    def _coerce_signal_array(self, column_name: str) -> Optional[np.ndarray]:
+        key = ("signal", column_name)
+        if key in self._column_cache:
+            return self._column_cache[key]
+        df = getattr(self, "current_df", None)
+        if df is None or column_name not in df.columns:
+            self._column_cache[key] = None
+            return None
+        series = df[column_name]
+        arr: Optional[np.ndarray] = None
+        try:
+            if pd_types.is_datetime64_any_dtype(series) or pd_types.is_timedelta64_dtype(series):
+                arr = None
+            elif pd_types.is_numeric_dtype(series):
+                arr = series.to_numpy(dtype=float, copy=False)
+            else:
+                coerced = pd.to_numeric(series, errors='coerce')
+                arr = coerced.to_numpy(dtype=float)
+                if self._count_valid(arr) < max(2, int(len(series) * 0.6)):
+                    normalized = pd.to_numeric(self._normalize_decimal_series(series), errors='coerce')
+                    arr_alt = normalized.to_numpy(dtype=float)
+                    if self._count_valid(arr_alt) > self._count_valid(arr):
+                        arr = arr_alt
+        except Exception:
+            arr = None
+        arr = self._validate_numeric_array(arr)
+        self._column_cache[key] = arr
+        return arr
+
+    def _coerce_time_array(self, column_name: str) -> Optional[np.ndarray]:
+        key = ("time", column_name)
+        if key in self._column_cache:
+            return self._column_cache[key]
+        df = getattr(self, "current_df", None)
+        if df is None or column_name not in df.columns:
+            self._column_cache[key] = None
+            return None
+        series = df[column_name]
+        arr: Optional[np.ndarray] = None
+        dt_series = None
+        try:
+            if pd_types.is_datetime64_any_dtype(series) or pd_types.is_timedelta64_dtype(series):
+                dt_series = series
+            elif pd_types.is_object_dtype(series.dtype) or pd_types.is_string_dtype(series.dtype):
+                dt_series = pd.to_datetime(series, errors='coerce', infer_datetime_format=True, utc=False)
+        except Exception:
+            dt_series = None
+        if dt_series is not None:
+            try:
+                valid_dt = dt_series.dropna()
+                if len(valid_dt) >= max(2, int(len(series) * 0.5)):
+                    base = valid_dt.iloc[0]
+                    arr = (dt_series - base).dt.total_seconds().to_numpy(dtype=float)
+            except Exception:
+                arr = None
+        if arr is None:
+            arr = self._coerce_signal_array(column_name)
+        arr = self._validate_numeric_array(arr, min_fraction=0.5)
+        self._column_cache[key] = arr
+        return arr
+
+    def _candidate_signal_columns(self) -> List[str]:
+        df = getattr(self, "current_df", None)
+        if df is None:
+            return []
+        cols: List[str] = []
+        for col in df.columns:
+            if self._coerce_signal_array(col) is not None:
+                cols.append(col)
+        return cols
+
+    def _candidate_time_columns(self) -> List[str]:
+        df = getattr(self, "current_df", None)
+        if df is None:
+            return []
+        cols: List[str] = []
+        for col in df.columns:
+            if self._coerce_time_array(col) is not None:
+                cols.append(col)
+        return cols
+
+    def _extract_time_signal(self, time_col: str, signal_col: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        t = self._coerce_time_array(time_col)
+        y = self._coerce_signal_array(signal_col)
+        if t is None or y is None or t.size != y.size:
+            return None, None
+        mask = np.isfinite(t) & np.isfinite(y)
+        if mask.sum() < 2:
+            return None, None
+        return t[mask], y[mask]
 
 
     def _calculate_rms(self, signal):
@@ -5040,11 +4099,16 @@ class MainApp:
 
             fft_signal_col = self.fft_dropdown.value
 
-            t = self.current_df[time_col].to_numpy()
+            if not time_col or time_col not in self.current_df.columns:
+                return ft.Text("Seleccione una columna de tiempo válida", size=14, color="#e74c3c")
+            if not fft_signal_col or fft_signal_col not in self.current_df.columns:
+                return ft.Text("Seleccione una señal para el análisis FFT", size=14, color="#e74c3c")
 
-            signal = self.current_df[fft_signal_col].to_numpy()
+            extracted = self._extract_time_signal(time_col, fft_signal_col)
+            if not extracted or any(part is None for part in extracted):
+                return ft.Text("No se pudo interpretar las columnas seleccionadas", size=14, color="#e74c3c")
 
-
+            t, signal = extracted
 
             # --- Filtrar periodo ---
 
@@ -5054,7 +4118,7 @@ class MainApp:
 
                 end_t = float(self.end_time_field.value) if self.end_time_field.value else t[-1]
 
-            except:
+            except Exception:
 
                 start_t, end_t = t[0], t[-1]
 
@@ -5612,13 +4676,25 @@ class MainApp:
 
                 if cb.value:
 
+                    pair = self._extract_time_signal(time_col, cb.label)
+
+                    if not pair or any(part is None for part in pair):
+
+                        continue
+
+                    tt, yy = pair
+
+                    if len(tt) < 2:
+
+                        continue
+
                     aux_fig, aux_ax = plt.subplots(figsize=(8, 2))
 
                     aux_ax.plot(
 
-                        self.current_df[time_col],
+                        tt,
 
-                        self.current_df[cb.label],
+                        yy,
 
                         color=color_dd.value,
 
@@ -5634,16 +4710,12 @@ class MainApp:
 
                     aux_ax.legend()
 
-                    aux_fig.tight_layout()
+                    aux_ax.set_xlabel("Tiempo (s)")
 
-                    aux_chart = _create_mpl_chart(aux_fig, expand=True, isolated=True)
-                    aux_plots.append(ft.Container(
-                        content=aux_chart,
-                        padding=12,
-                        border_radius=14,
-                        bgcolor=ft.Colors.with_opacity(0.04, self._accent_ui()),
-                        expand=True,
-                    ))
+                    aux_ax.set_ylabel(cb.label)
+
+                    aux_plots.append(ft.Container(content=_create_mpl_chart(aux_fig, expand=True, isolated=True), padding=ft.padding.all(10), bgcolor=ft.Colors.with_opacity(0.06, self._accent_ui()), border_radius=12))
+
                     plt.close(aux_fig)
 
             # --- Resumen Ejecutivo (mm/s, formal al inicio) ---
@@ -6841,6 +5913,8 @@ class MainApp:
 
                     self.current_df = None
 
+                    self._reset_column_cache()
+
                 else:
 
                     self._load_file_data(self.uploaded_files[0])
@@ -6924,43 +5998,34 @@ class MainApp:
 
 
 
-            # Detectar columnas numéricas
+            # Preparar DataFrame y detectar columnas utilizables
+            self.current_df = df
+            self._reset_column_cache()
 
-            numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
-
-            if not numeric_cols:
-
-                self._log(f"Archivo inválido: {file_path} no tiene columnas numéricas")
-
+            signal_cols = self._candidate_signal_columns()
+            if not signal_cols:
+                self._log(f"Archivo inválido: {file_path} no tiene señales numéricas utilizables")
                 self.page.snack_bar = ft.SnackBar(
-
-                    content=ft.Text("⚠️ El archivo no contiene columnas numéricas para análisis"),
-
+                    content=ft.Text("⚠️ El archivo no contiene señales numéricas para análisis"),
                     bgcolor="#e74c3c",
-
                 )
-
                 self.page.snack_bar.open = True
-
                 self.page.update()
-
+                self.current_df = None
+                self._reset_column_cache()
                 return
 
+            time_candidates = self._candidate_time_columns()
+            if time_candidates:
+                self.default_time_col = time_candidates[0]
+            else:
+                self.default_time_col = signal_cols[0]
 
-
-            # Columna de tiempo y señales
-
-            time_candidates = [c for c in numeric_cols if "t" in c.lower()]
-
-            self.default_time_col = time_candidates[0] if time_candidates else numeric_cols[0]
-
-            self.default_signal_cols = [c for c in numeric_cols if c != self.default_time_col]
-
-
+            self.default_signal_cols = [c for c in signal_cols if c != self.default_time_col]
+            if not self.default_signal_cols and len(signal_cols) > 1:
+                self.default_signal_cols = signal_cols[1:]
 
             self.file_data_storage[file_path] = df
-
-            self.current_df = df
 
             self._log(f"Datos cargados: {file_path} ({len(df)} filas, {len(df.columns)} columnas)")
 
@@ -7130,7 +6195,17 @@ class MainApp:
 
             time_col = self.time_dropdown.value
 
-            t = self.current_df[time_col].to_numpy()
+            t_raw = self._coerce_time_array(time_col)
+
+            if t_raw is None:
+
+                self.multi_chart_container.content = ft.Text("No se pudo interpretar la columna de tiempo seleccionada")
+
+                if self.multi_chart_container.page:
+
+                    self.multi_chart_container.update()
+
+                return
 
             selected_signals = [cb.label for cb in self.signal_checkboxes if cb.value]
 
@@ -7186,19 +6261,33 @@ class MainApp:
 
                 for sig in selected_signals:
 
-                    y = self.current_df[sig].to_numpy()
+                    y_raw = self._coerce_signal_array(sig)
 
-                    N = len(y)
-
-                    if N < 2:
+                    if y_raw is None or y_raw.size != t_raw.size:
 
                         continue
 
-                    T = t[1] - t[0]
+                    mask = np.isfinite(t_raw) & np.isfinite(y_raw)
 
-                    yf = np.fft.fft(y)
+                    t_vals = t_raw[mask]
 
-                    xf = np.fft.fftfreq(N, T)[:N // 2]
+                    y_vals = y_raw[mask]
+
+                    if len(t_vals) < 2:
+
+                        continue
+
+                    dt = float(np.median(np.diff(t_vals))) if len(t_vals) > 1 else 0.0
+
+                    if not np.isfinite(dt) or dt <= 0:
+
+                        continue
+
+                    N = len(y_vals)
+
+                    yf = np.fft.fft(y_vals)
+
+                    xf = np.fft.fftfreq(N, dt)[:N // 2]
 
                     mag_acc = 2.0 / N * np.abs(yf[0:N // 2])
 

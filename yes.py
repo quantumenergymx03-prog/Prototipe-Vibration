@@ -5864,6 +5864,7 @@ class MainApp:
 
             content_controls = [
                 resumen_exec,
+                resumen,
                 explanations_container,
                 ft.Text(_fft_filter_note),
                 chart_card,

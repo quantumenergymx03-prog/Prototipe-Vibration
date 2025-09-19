@@ -5862,33 +5862,59 @@ class MainApp:
                 padding=10,
             )
 
-            content_controls = [
+            resumen_controls = [
                 resumen_exec,
+                resumen,
                 explanations_container,
+            ]
+
+            charts_controls = [
                 ft.Text(_fft_filter_note),
                 chart_card,
             ]
             if waterfall_block:
-                content_controls.append(waterfall_block)
+                charts_controls.append(waterfall_block)
             if env_card:
-                content_controls.append(env_card)
-            content_controls.extend(aux_plots)
+                charts_controls.append(env_card)
+            charts_controls.extend(aux_plots)
+
+            resumen_tab = ft.Tab(
+                text="Resumen",
+                icon=ft.Icons.ARTICLE_ROUNDED,
+                content=ft.Container(
+                    padding=10,
+                    content=ft.Column(
+                        controls=resumen_controls,
+                        spacing=18,
+                        scroll="auto",
+                        expand=True,
+                    ),
+                ),
+            )
+
+            charts_tab = ft.Tab(
+                text="Gráficas",
+                icon=ft.Icons.SHOW_CHART_ROUNDED,
+                content=ft.Container(
+                    padding=10,
+                    content=ft.Column(
+                        controls=charts_controls,
+                        spacing=20,
+                        scroll="auto",
+                        expand=True,
+                    ),
+                ),
+            )
+
+            analysis_tabs = ft.Tabs(
+                animation_duration=220,
+                expand=1,
+                tabs=[resumen_tab, charts_tab],
+            )
 
             return ft.Container(
-
                 expand=True,
-
-                content=ft.Column(
-
-                    controls=content_controls,
-
-                    spacing=20,
-
-                    scroll="auto",   # scroll vertical aquí (válido en Column)
-
-                    expand=True
-
-                )
+                content=analysis_tabs,
             )
         except Exception as e:
             try:

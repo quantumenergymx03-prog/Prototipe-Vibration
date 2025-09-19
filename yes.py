@@ -3767,7 +3767,63 @@ class MainApp:
 
         numeric_cols = self.current_df.select_dtypes(include=np.number).columns.tolist()
 
-        initial_time_col = "t_s" if "t_s" in numeric_cols else (numeric_cols[0] if numeric_cols else None)
+        if len(numeric_cols) < 2:
+
+            return ft.Container(
+
+                content=ft.Column(
+
+                    [
+
+                        ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, size=80, color="#e74c3c"),
+
+                        ft.Text(
+
+                            "El archivo necesita al menos una columna de tiempo y otra de señal numérica",
+
+                            size=16,
+
+                            text_align="center",
+
+                        ),
+
+                        ft.Text(
+
+                            "Verifique el formato del archivo o ajuste la configuración de importación.",
+
+                            size=12,
+
+                            text_align="center",
+
+                            color="#95a5a6",
+
+                        ),
+
+                    ],
+
+                    alignment="center",
+
+                    horizontal_alignment="center",
+
+                    spacing=10,
+
+                ),
+
+                alignment=ft.alignment.center,
+
+                expand=True,
+
+            )
+
+
+
+        preferred_time_col = getattr(self, "default_time_col", None)
+
+        initial_time_col = preferred_time_col if preferred_time_col in numeric_cols else None
+
+        if initial_time_col is None:
+
+            initial_time_col = "t_s" if "t_s" in numeric_cols else numeric_cols[0]
 
 
 
@@ -3791,13 +3847,71 @@ class MainApp:
 
         available_signals = [col for col in numeric_cols if col != initial_time_col]
 
+        preferred_signal_cols = [
+
+            col for col in getattr(self, "default_signal_cols", []) if col in available_signals
+
+        ]
+
+        initial_fft_col = preferred_signal_cols[0] if preferred_signal_cols else (available_signals[0] if available_signals else None)
+
+        if initial_fft_col is None:
+
+            return ft.Container(
+
+                content=ft.Column(
+
+                    [
+
+                        ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, size=80, color="#e74c3c"),
+
+                        ft.Text(
+
+                            "No se encontró ninguna señal numérica para analizar",
+
+                            size=16,
+
+                            text_align="center",
+
+                        ),
+
+                        ft.Text(
+
+                            "Seleccione un archivo que incluya columnas de vibración además del tiempo.",
+
+                            size=12,
+
+                            text_align="center",
+
+                            color="#95a5a6",
+
+                        ),
+
+                    ],
+
+                    alignment="center",
+
+                    horizontal_alignment="center",
+
+                    spacing=10,
+
+                ),
+
+                alignment=ft.alignment.center,
+
+                expand=True,
+
+            )
+
+
+
         self.fft_dropdown = ft.Dropdown(
 
             label="Señal FFT",
 
             options=[ft.dropdown.Option(col) for col in available_signals],
 
-            value=available_signals[0] if available_signals else None,
+            value=initial_fft_col,
 
             expand=True
 
@@ -5039,6 +5153,11 @@ class MainApp:
             time_col = self.time_dropdown.value
 
             fft_signal_col = self.fft_dropdown.value
+
+            if not time_col or time_col not in self.current_df.columns:
+                return ft.Text("Seleccione una columna de tiempo válida", size=14, color="#e74c3c")
+            if not fft_signal_col or fft_signal_col not in self.current_df.columns:
+                return ft.Text("Seleccione una señal para el análisis FFT", size=14, color="#e74c3c")
 
             t = self.current_df[time_col].to_numpy()
 

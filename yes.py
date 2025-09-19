@@ -906,7 +906,7 @@ class MainApp:
 
         self.main_content_area = ft.Container(
 
-            expand=True, 
+            expand=True,
 
             padding=25,
 
@@ -920,7 +920,18 @@ class MainApp:
 
         )
 
-        
+        builder = getattr(self, "_build_welcome_view", None)
+        if callable(builder):
+            try:
+                initial_content = builder()
+            except Exception:
+                initial_content = self._build_fallback_welcome()
+        else:
+            initial_content = self._build_fallback_welcome()
+
+        self.main_content_area.content = initial_content
+
+
 
         # Layout principal con diseño mejorado
 
@@ -942,9 +953,7 @@ class MainApp:
 
         )
 
-        
 
-        self.main_content_area.content = self._build_welcome_view()
 
         self.page.run_task(self._start_clock_timer)
 
@@ -3014,6 +3023,27 @@ class MainApp:
 
 
 
+    def _build_fallback_welcome(self):
+        return ft.Column(
+            alignment="center",
+            horizontal_alignment="center",
+            controls=[
+                ft.Icon(ft.Icons.INFO_OUTLINED, size=80, color=self._accent_ui()),
+                ft.Text(
+                    "Bienvenido",
+                    size=24,
+                    weight="bold",
+                    text_align="center"
+                ),
+                ft.Text(
+                    "Carga un archivo de datos para comenzar el análisis.",
+                    size=14,
+                    text_align="center",
+                    color="#7f8c8d"
+                ),
+            ],
+        )
+
     def _build_welcome_view(self):
 
         return ft.Column(
@@ -3088,9 +3118,9 @@ class MainApp:
 
                             icon=ft.Icons.DESCRIPTION_ROUNDED,
 
-                            on_click=lambda _: self.page.launch_url("https://drive.google.com/file/d/1UqlL1s7jGTq3A38UV2r6AE2eVb915w41/view?usp=sharing")
-
-,
+                            on_click=lambda _: self.page.launch_url(
+                                "https://drive.google.com/file/d/1UqlL1s7jGTq3A38UV2r6AE2eVb915w41/view?usp=sharing"
+                            ),
 
                             style=ft.ButtonStyle(
 

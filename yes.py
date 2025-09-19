@@ -6628,35 +6628,27 @@ class MainApp:
 
 
 
-        # Construir la vista correspondiente
+        # Construir la vista correspondiente de forma segura
+        builders = {
+            "welcome": getattr(self, "_build_welcome_view", None),
+            "files": getattr(self, "_build_files_view", None),
+            "analysis": getattr(self, "_build_analysis_view", None),
+            "reports": getattr(self, "_build_reports_view", None),
+            "settings": getattr(self, "_build_settings_view", None),
+            "bearings": getattr(self, "_build_bearings_view", None),
+        }
 
-        if view_key == "welcome":
+        builder = builders.get(view_key)
+        if not callable(builder):
+            builder = builders.get("welcome")
 
-            new_view = self._build_welcome_view()
+        if not callable(builder):
+            builder = self._build_fallback_welcome
 
-        elif view_key == "files":
-
-            new_view = self._build_files_view()
-
-        elif view_key == "analysis":
-
-            new_view = self._build_analysis_view()
-
-        elif view_key == "reports":
-
-            new_view = self._build_reports_view()
-
-        elif view_key == "settings":
-
-            new_view = self._build_settings_view()
-
-        elif view_key == "bearings":
-
-            new_view = self._build_bearings_view()
-
-        else:
-
-            new_view = self._build_welcome_view()
+        try:
+            new_view = builder()
+        except Exception:
+            new_view = self._build_fallback_welcome()
 
 
 

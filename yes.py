@@ -920,16 +920,9 @@ class MainApp:
 
         )
 
-        builder = getattr(self, "_build_welcome_view", None)
-        if callable(builder):
-            try:
-                initial_content = builder()
-            except Exception:
-                initial_content = self._build_fallback_welcome()
-        else:
-            initial_content = self._build_fallback_welcome()
-
-        self.main_content_area.content = initial_content
+        self.main_content_area.content = self._build_view_safe(
+            getattr(self, "_build_welcome_view", None)
+        )
 
 
 
@@ -3043,6 +3036,40 @@ class MainApp:
                 ),
             ],
         )
+
+    def _build_view_safe(self, builder, fallback=None):
+        fallback_builder = fallback or self._build_fallback_welcome
+
+        if callable(builder):
+            try:
+                result = builder()
+                if result is not None:
+                    return result
+            except Exception:
+                pass
+
+        try:
+            return fallback_builder()
+        except Exception:
+            return ft.Column(
+                alignment="center",
+                horizontal_alignment="center",
+                controls=[
+                    ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, size=60, color=self._accent_ui()),
+                    ft.Text(
+                        "No se pudo construir la vista",
+                        weight="bold",
+                        size=20,
+                        text_align="center",
+                    ),
+                    ft.Text(
+                        "Ocurrió un problema al crear la pantalla solicitada.",
+                        size=14,
+                        text_align="center",
+                        color="#7f8c8d",
+                    ),
+                ],
+            )
 
     def _build_welcome_view(self):
 
@@ -6639,16 +6666,11 @@ class MainApp:
         }
 
         builder = builders.get(view_key)
-        if not callable(builder):
-            builder = builders.get("welcome")
+        fallback_builder = builders.get("welcome")
+        if not callable(fallback_builder):
+            fallback_builder = None
 
-        if not callable(builder):
-            builder = self._build_fallback_welcome
-
-        try:
-            new_view = builder()
-        except Exception:
-            new_view = self._build_fallback_welcome()
+        new_view = self._build_view_safe(builder, fallback=fallback_builder)
 
 
 

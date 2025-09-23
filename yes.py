@@ -4371,9 +4371,45 @@ class MainApp:
 
             await asyncio.sleep(0.1)
 
-            
 
-            new_chart = self._create_plot()
+
+            try:
+
+                new_chart = self._create_plot()
+
+            except Exception as ex:
+
+                self._log(f"Error al generar análisis: {ex}")
+
+                new_chart = ft.Column(
+
+                    [
+
+                        ft.Icon(ft.Icons.ERROR_OUTLINE_ROUNDED, size=60, color="#e74c3c"),
+
+                        ft.Text("No se pudo generar el análisis.", size=16, weight="bold"),
+
+                        ft.Text(
+
+                            "Revisa los parámetros de entrada e intenta nuevamente.",
+
+                            size=12,
+
+                            color="#bdc3c7",
+
+                            text_align="center",
+
+                        ),
+
+                    ],
+
+                    alignment="center",
+
+                    horizontal_alignment="center",
+
+                    expand=True,
+
+                )
 
             self.chart_container.content = new_chart
 

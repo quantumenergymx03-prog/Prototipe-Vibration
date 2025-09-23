@@ -906,7 +906,7 @@ class MainApp:
 
         self.main_content_area = ft.Container(
 
-            expand=True, 
+            expand=True,
 
             padding=25,
 
@@ -920,7 +920,11 @@ class MainApp:
 
         )
 
-        
+        self.main_content_area.content = self._build_view_safe(
+            getattr(self, "_build_welcome_view", None)
+        )
+
+
 
         # Layout principal con diseño mejorado
 
@@ -942,9 +946,7 @@ class MainApp:
 
         )
 
-        
 
-        self.main_content_area.content = self._build_welcome_view()
 
         self.page.run_task(self._start_clock_timer)
 
@@ -3014,6 +3016,61 @@ class MainApp:
 
 
 
+    def _build_fallback_welcome(self):
+        return ft.Column(
+            alignment="center",
+            horizontal_alignment="center",
+            controls=[
+                ft.Icon(ft.Icons.INFO_OUTLINED, size=80, color=self._accent_ui()),
+                ft.Text(
+                    "Bienvenido",
+                    size=24,
+                    weight="bold",
+                    text_align="center"
+                ),
+                ft.Text(
+                    "Carga un archivo de datos para comenzar el análisis.",
+                    size=14,
+                    text_align="center",
+                    color="#7f8c8d"
+                ),
+            ],
+        )
+
+    def _build_view_safe(self, builder, fallback=None):
+        fallback_builder = fallback or self._build_fallback_welcome
+
+        if callable(builder):
+            try:
+                result = builder()
+                if result is not None:
+                    return result
+            except Exception:
+                pass
+
+        try:
+            return fallback_builder()
+        except Exception:
+            return ft.Column(
+                alignment="center",
+                horizontal_alignment="center",
+                controls=[
+                    ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, size=60, color=self._accent_ui()),
+                    ft.Text(
+                        "No se pudo construir la vista",
+                        weight="bold",
+                        size=20,
+                        text_align="center",
+                    ),
+                    ft.Text(
+                        "Ocurrió un problema al crear la pantalla solicitada.",
+                        size=14,
+                        text_align="center",
+                        color="#7f8c8d",
+                    ),
+                ],
+            )
+
     def _build_welcome_view(self):
 
         return ft.Column(
@@ -3088,9 +3145,9 @@ class MainApp:
 
                             icon=ft.Icons.DESCRIPTION_ROUNDED,
 
-                            on_click=lambda _: self.page.launch_url("https://drive.google.com/file/d/1UqlL1s7jGTq3A38UV2r6AE2eVb915w41/view?usp=sharing")
-
-,
+                            on_click=lambda _: self.page.launch_url(
+                                "https://drive.google.com/file/d/1UqlL1s7jGTq3A38UV2r6AE2eVb915w41/view?usp=sharing"
+                            ),
 
                             style=ft.ButtonStyle(
 
@@ -6635,35 +6692,22 @@ class MainApp:
 
 
 
-        # Construir la vista correspondiente
+        # Construir la vista correspondiente de forma segura
+        builders = {
+            "welcome": getattr(self, "_build_welcome_view", None),
+            "files": getattr(self, "_build_files_view", None),
+            "analysis": getattr(self, "_build_analysis_view", None),
+            "reports": getattr(self, "_build_reports_view", None),
+            "settings": getattr(self, "_build_settings_view", None),
+            "bearings": getattr(self, "_build_bearings_view", None),
+        }
 
-        if view_key == "welcome":
+        builder = builders.get(view_key)
+        fallback_builder = builders.get("welcome")
+        if not callable(fallback_builder):
+            fallback_builder = None
 
-            new_view = self._build_welcome_view()
-
-        elif view_key == "files":
-
-            new_view = self._build_files_view()
-
-        elif view_key == "analysis":
-
-            new_view = self._build_analysis_view()
-
-        elif view_key == "reports":
-
-            new_view = self._build_reports_view()
-
-        elif view_key == "settings":
-
-            new_view = self._build_settings_view()
-
-        elif view_key == "bearings":
-
-            new_view = self._build_bearings_view()
-
-        else:
-
-            new_view = self._build_welcome_view()
+        new_view = self._build_view_safe(builder, fallback=fallback_builder)
 
 
 
